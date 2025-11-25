@@ -1,0 +1,5 @@
+crewai[google-genai]
+streamlit
+cognee
+python-dotenv
+crewai-tools
