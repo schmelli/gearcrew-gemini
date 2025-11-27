@@ -1,62 +1,124 @@
 from crewai import Agent
-from src.config import get_gemini_3_pro_preview
-from src.tools.search_tools import search_tool
-from src.tools.cognee_tools import CogneeAddDataTool, CogneeCognifyTool
+from src.config import get_gemini_pro, get_gemini_flash
+from src.tools.geargraph_tools import GearGraphTools
 
-# Initialize Tools
-cognee_add_tool = CogneeAddDataTool()
-cognee_cognify_tool = CogneeCognifyTool()
+def create_research_agents():
+    gemini = get_gemini_pro()
+    gemini_fast = get_gemini_flash()
 
-def create_agents():
-    gemini_3_pro_preview = get_gemini_3_pro_preview()
+    # Tool-Instanzen abrufen
+    tool_find = GearGraphTools.find_similar_nodes
+    tool_search = GearGraphTools.search_web
+    tool_validate = GearGraphTools.validate_ontology_compliance
 
-    # Agent 1: Gear Info Extractor
-    extractor = Agent(
-        role='Gear Information Extractor',
-        goal='Extract precise gear specifications (name, weight, materials, etc.) from raw text.',
-        backstory="""You are a meticulous technical analyst. You receive raw summaries or transcripts 
-        and extract structured data about hiking gear. You do not hallucinate; if a spec isn't there, you don't invent it.""",
-        llm=gemini_3_pro_preview,
+    # 1. Der Profiler (Context Analyst)
+    profiler = Agent(
+        role='Context Analyst',
+        goal='Analyze the source (text/URL) to determine reliability and potential risks.',
+        backstory="""You are a media analyst for outdoor gear.
+        Your job is to set the "context" for the investigation.
+        - Is this a YouTube transcript? -> WARNING: Expect phonetic errors ("Hilly Bird" instead of "Hilleberg").
+        - Is it a manufacturer page? -> High trust.
+        - Is it a user review? -> Subjective opinion.""",
+        llm=gemini_fast,
         verbose=True,
         allow_delegation=False
     )
 
-    # Agent 2: Info Verifier
-    verifier = Agent(
-        role='Gear Information Verifier',
-        goal='Verify extracted gear data against the internet, correct errors, and collect official product URLs.',
-        backstory="""You are a skepticism-driven fact-checker. You take the extracted data and search the web 
-        to ensure brand names (e.g., "ZPacks" not "CBacks"), weights, and model names are accurate. 
-        You correct any discrepancies found in the source text.""",
-        tools=[search_tool],
-        llm=gemini_3_pro_preview,
-        verbose=True,
-        allow_delegation=False
+    # 2. Der Detective (Gear Detective)
+    detective = Agent(
+        role='Gear Detective',
+        goal='Extract entities and verify them against the Graph and the Web.',
+        backstory="""You are a forensic gear data investigator. You trust nothing you haven't verified.
+        
+        YOUR PROCESS:
+        1. Extract Brand & Product names from the text.
+        2. GRAPH CHECK (Mandatory!): Use 'Find Similar Nodes'. Do we already have this?
+           - If tool returns "SUCCESS": This means the tool WORKED and found data. READ THE JSON!
+           - If YES (nodes found): Use the exact spelling and ID from the graph.
+           - If NO (no nodes found): Use 'Firecrawl Search' to verify existence.
+        3. DATA ENRICHMENT: We want to collect all relevant specifications! Missing weight? Search for it! Missing productUrl? Search for it! Missing other specs? You know what to do!!
+        
+        Your output is NOT code, but a clean JSON list of verified facts and relevant specifications.""",
+        tools=[tool_find, tool_search],
+        llm=gemini,
+        verbose=True
     )
 
-    # Agent 3: Knowledge Miner
-    miner = Agent(
-        role='Gear Knowledge Specialist',
-        goal='Extract practical usage tips, tricks, and specific "gear knowledge" related to the verified items.',
-        backstory="""You are an experienced thru-hiker. You look at the gear item and the context 
-        to find specific, non-obvious usage tips (e.g., "pitch fly first in rain"). 
-        You focus on "how-to" and practical benefits.""",
-        llm=gemini_3_pro_preview,
-        verbose=True,
-        allow_delegation=False
+    # 3. Der Wisdom Hunter (Insight Specialist)
+    hunter = Agent(
+        role='Wisdom Hunter',
+        goal='Extract practical tips, care instructions, and "hiker wisdom" from the text.',
+        backstory="""You are an experienced outdoor guide. You don't care about specs (weight, price). 
+        You care about KNOWLEDGE.
+        
+        YOUR JOB:
+        Scan the text for:
+        - Maintenance tips (e.g. "Store uncompressed")
+        - Usage tricks (e.g. "Pitch fly first")
+        - Warnings (e.g. "Not suitable for winter")
+        
+        Output a clean JSON list of "Insights". Each insight should have:
+        - "summary": Short title
+        - "content": The full advice
+        - "related_product": The name of the product this applies to (if specific) or "General".""",
+        llm=gemini,
+        verbose=True
     )
 
-    # Agent 4: Database Administrator
-    db_admin = Agent(
-        role='Graph Database Administrator',
-        goal='Populate the Cognee graph database with the verified and enriched gear information.',
-        backstory="""You are responsible for the integrity of the knowledge graph. 
-        You take the final, verified, and enriched data and commit it to the database using the appropriate tools. 
-        You ensure the ontology is respected.""",
-        tools=[cognee_add_tool, cognee_cognify_tool],
-        llm=gemini_3_pro_preview,
-        verbose=True,
-        allow_delegation=False
+    # 4. Der Architect (Ontology Architect)
+    architect = Agent(
+        role='Ontology Architect',
+        goal='Transform verified facts into a valid Cypher import plan.',
+        backstory="""You are the guardian of the database structure. You receive clean facts from the Detective.
+        Your task: Create the Cypher code (MERGE, not CREATE).
+        
+        YOUR RULES:
+        1. Separate ProductFamily (Series, e.g. Nallo) and GearItem (Variant, e.g. Nallo 2).
+        2. Attach common attributes to the Family.
+        3. Attach specific attributes (Weight, Price) to the Item.
+        4. Use 'Validate Against Ontology' if you are unsure about a Label.
+        5. **PERFORMANCE**: Always use `UNWIND` for batch operations. Never create 100 separate MERGE queries when one UNWIND can do it.
+        6. **INSIGHTS**: Create (:Insight) nodes for tips and connect them to the relevant GearItem or Family with [:HAS_TIP].
+        7. **SYNTAX**: When creating the `UNWIND [...]` list, ensure the map keys are **NOT QUOTED**. 
+           - BAD: `[{ "name": "Tent" }]`
+           - GOOD: `[{ name: "Tent" }]`
+           Memgraph Cypher does not like quoted keys in map literals.
+        
+        IMPORTANT: You do NOT execute the code. You only provide the Markdown block. 
+        You do NOT provide any other text or code.""",
+        tools=[tool_validate],
+        llm=gemini,
+        verbose=True
     )
 
-    return extractor, verifier, miner, db_admin
+    return profiler, detective, hunter, architect
+
+def create_ops_agents():
+    gemini = get_gemini_pro()
+    tool_execute = GearGraphTools.execute_cypher
+    
+    # 4. Der Gatekeeper (Database Gatekeeper)
+    gatekeeper = Agent(
+        role='Database Gatekeeper',
+        goal='Execute approved Cypher code safely.',
+        backstory="""You are the final authority. You only execute code that has been explicitly approved by the user.
+        You log every execution.""",
+        tools=[tool_execute],
+        llm=gemini,
+        verbose=True
+    )
+    
+    # 5. Der Gardener (Graph Gardener)
+    gardener = Agent(
+        role='Graph Gardener',
+        goal='Analyze the graph after changes and find new connections.',
+        backstory="""You run after data import.
+        You look for orphans (nodes without edges) or duplicates.
+        You suggest new connections (e.g., "These two tents are similar").""",
+        tools=[tool_execute], # Darf eigene Korrekturen machen
+        llm=gemini,
+        verbose=True
+    )
+    
+    return gatekeeper, gardener

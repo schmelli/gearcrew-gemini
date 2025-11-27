@@ -1,5 +1,9 @@
 crewai[google-genai]
 streamlit
-cognee
+gqlalchemy
 python-dotenv
 crewai-tools
+rdflib
+networkx
+firecrawl-py
+google

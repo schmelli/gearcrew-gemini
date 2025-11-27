@@ -1,81 +1,152 @@
 from crewai import Task
 
-def create_tasks(extractor, verifier, miner, db_admin, source_text, dataset_name, ontology_file, source_url=None):
+def create_extraction_tasks(profiler, detective, hunter, source_text, source_url):
     
-    # Task 1: Extraction
-    extract_task = Task(
-        description=f"""Analyze the following source text and extract a list of SPECIFIC hiking gear products mentioned.
+    # Task 1: Profiling
+    profile_task = Task(
+        description=f"""
+        Analysiere diesen Input-Text und die URL: '{source_url}'.
+        1. Um was für eine Quelle handelt es sich?
+        2. Welche spezifischen Fehlerarten sind zu erwarten (z.B. "Hillyberg" statt "Hilleberg" bei Audio)?
+        3. Gib Anweisungen für den Detective, wie streng er prüfen muss.
         
-        CRITICAL RULES:
-        1. VALID ITEMS ONLY: You must ONLY extract items that have BOTH a specific BRAND NAME and a PRODUCT MODEL NAME (e.g., "Durston X-Mid 1", "Osprey Exos 58").
-        2. IGNORE GENERICS: Do NOT extract generic items or categories (e.g., "heavy-duty trash bag", "comfortable quilt", "lightweight backpack", "a tent"). If it doesn't have a capitalized Brand Name, ignore it.
-        3. IGNORE ATTRIBUTES AS ITEMS: Do not list features or attributes (e.g., "waterproof", "15D nylon") as separate items.
-        
-        For each valid item, extract:
-        - Brand Name
-        - Product Name
-        - Weight (CRITICAL: Look specifically for lbs, oz, g, kg. If found, include it!)
-        - ALL Specifications found (Dimensions, Materials, Denier, Temp Ratings, Volume, etc.) - Be exhaustive!
-        - Brief Description
-        
-        Source Text:
-        {source_text}""",
-        expected_output="A structured list of specific, branded gear items with their raw extracted specs. No generic items.",
-        agent=extractor
+        INPUT TEXT:
+        {source_text[:1000]}...
+        """,
+        agent=profiler,
+        expected_output="Ein kurzer Risiko-Bericht und Verification-Policy."
     )
 
-    # Task 2: Verification
-    verify_task = Task(
-        description="""Take the list of extracted gear items. 
-        For each item, perform a web search to verify:
-        1. The spelling of the Brand and Product name.
-        2. The accuracy of ALL specs. If specs (weight, material, dims) are missing, FIND THEM on the manufacturer's site.
-        3. Ensure the item actually exists as a commercial product.
-        4. **CAPTURE URLs**: Record the official Manufacturer Product Page URL and any key review URLs found.
+    # Task 2: Investigation (Der Kern-Task)
+    investigation_task = Task(
+        description=f"""
+        Basierend auf der Policy des Profilers: Extrahiere und verifiziere alle Gear-Items.
         
-        CRITICAL FILTERING STEP:
-        - If an item turns out to be a generic description (e.g., "Ultralight Quilt" with no brand) or a feature (e.g., "Hip Belt Pockets"), REMOVE IT from the list.
-        - Ensure the "Product Name" is the specific model name (e.g., "X-Mid 1") and not a category (e.g., "1p Tent").
+        QUELLE:
+        {source_text}
         
-        Output a corrected, verified, and FILTERED list of gear items. 
-        MUST include: Correct Brand/Model, Expanded Specs (verified), and Found URLs.""",
-        expected_output="A verified, corrected, and filtered list of gear items (Brand + Model) with accurate specs and Product URLs.",
-        agent=verifier,
-        context=[extract_task]
+        SCHRITTE:
+        1. Extrahiere Roh-Namen.
+        2. GRAPH CHECK: Prüfe mit 'Find Similar Nodes', ob wir das Item oder die Brand schon haben.
+           -> Wenn ja: Übernimm die Schreibweise und IDs.
+        3. WEB CHECK (Firecrawl): Suche fehlende Daten (Gewicht, Material, URL).
+           -> Korrigiere Namen.
+        
+        OUTPUT FORMAT (JSON):
+        Eine Liste von Objekten mit: 
+        {{
+          "original_name": "...", 
+          "verified_name": "...", 
+          "is_new_to_graph": bool, 
+          "specs": {{...}}, 
+          "url": "..."
+        }}
+        """,
+        agent=detective,
+        context=[profile_task],
+        expected_output="Eine JSON-Liste mit vollständig verifizierten Produktdaten."
     )
 
-    # Task 3: Knowledge Mining
-    mining_task = Task(
-        description="""Using the verified gear list and the original source text, 
-        identify specific "usage knowledge" or "tips" associated with each item.
-        Example: "Durston X-Mid: can be pitched fly-first in rain."
+    # Task 3: Wisdom Hunting
+    wisdom_task = Task(
+        description=f"""
+        Suche nach praktischen Tipps, Tricks und Warnungen im Text.
         
-        If the source text doesn't have enough info, use your internal knowledge to add 1-2 common pro-tips 
-        verified for that specific gear item.""",
-        expected_output="The gear list enriched with specific usage tips and practical knowledge points.",
-        agent=miner,
-        context=[verify_task] # Uses the output of the verifier
+        QUELLE:
+        {source_text}
+        
+        OUTPUT FORMAT (JSON):
+        Eine Liste von Objekten:
+        {{
+            "summary": "...",
+            "content": "...",
+            "related_product": "..." (oder "General")
+        }}
+        """,
+        agent=hunter,
+        expected_output="Eine JSON-Liste mit Gear Insights."
     )
 
-    # Task 4: DB Ingestion
-    ingest_task = Task(
-        description=f"""Take the fully verified and enriched gear data. 
-        1. Format the data into a STRICT JSON string. Each item in the list must have the following keys:
-           - "brand": Brand Name
-           - "model": Product Model Name
-           - "weight": Weight string (e.g., "1.5 lbs", "680g") - CRITICAL: Do not omit if available.
-           - "specifications": Dictionary of ALL technical specs (Material, Dimensions, Volume, R-Value, etc.)
-           - "product_url": Official Manufacturer Product Page URL (found during verification)
-           - "description": Brief description
-           - "tips": List of usage tips
-        2. Use the 'Cognee Add Data' tool to add this JSON string to the dataset '{dataset_name}'.
-           - IMPORTANT: Pass the source URL '{source_url}' to the tool if it is not "None" or empty.
-        3. Use the 'Cognee Cognify' tool to process the dataset.
-        
-        Ensure you report the status returned by the tools.""",
-        expected_output="Confirmation of JSON data insertion and cognification.",
-        agent=db_admin,
-        context=[mining_task]
-    )
+    return [profile_task, investigation_task, wisdom_task]
 
-    return [extract_task, verify_task, mining_task, ingest_task]
+def create_refinement_task(detective, current_data, user_feedback):
+    refine_task = Task(
+        description=f"""
+        Der User hat Feedback zu den extrahierten Daten gegeben. Bitte aktualisiere die Daten entsprechend.
+        
+        AKTUELLE DATEN (JSON):
+        {current_data}
+        
+        USER FEEDBACK:
+        "{user_feedback}"
+        
+        AUFGABE:
+        1. Verstehe, was der User korrigiert haben will (z.B. falscher Name, falsches Gewicht, falsche Zuordnung).
+        2. Wenn nötig, nutze Tools (Suche), um die Korrektur zu verifizieren.
+        3. Gib die KORRIGIERTE JSON-Liste zurück.
+        
+        OUTPUT FORMAT:
+        Nur das reine JSON.
+        """,
+        agent=detective,
+        expected_output="Die korrigierte JSON-Liste."
+    )
+    return [refine_task]
+
+def create_blueprint_task(architect, verified_data_json, verified_insights_json):
+    # Task 4: Blueprint (Planung)
+    blueprint_task = Task(
+        description=f"""
+        Nimm die verifizierten Daten und Insights und erstelle den Cypher-Import-Plan.
+        
+        VERIFIZIERTE DATEN:
+        {verified_data_json}
+        
+        VERIFIZIERTE INSIGHTS:
+        {verified_insights_json}
+        
+        WICHTIG:
+        - Nutze für 'is_new_to_graph=False' Items unbedingt MERGE auf den existierenden Namen.
+        - Beachte die ProductFamily (Serie) vs. GearItem (Variante) Logik!
+        - Gemeinsame Specs -> Family. Spezifische Specs -> Item.
+        - **BATCH PROCESSING**: Nutze `UNWIND` für das Einfügen von Daten. Erstelle eine Liste von Maps und iteriere darüber, anstatt viele einzelne MERGE Statements zu schreiben.
+        - **INSIGHTS**: Verbinde Insights mit den passenden Items oder Families.
+        
+        Gib NUR den Cypher-Code in einem Markdown Block zurück (```cypher ... ```).
+        """,
+        agent=architect,
+        expected_output="Ein validierter Cypher-Code Block."
+    )
+    return [blueprint_task]
+
+def create_execution_tasks(gatekeeper, gardener, approved_cypher_plan, source_info):
+    
+    # Task 4: Execution
+    execute_task = Task(
+        description=f"""
+        Führe folgenden Cypher-Plan aus, den der User freigegeben hat.
+        
+        PLAN:
+        {approved_cypher_plan}
+        
+        REASON:
+        User Approved Import from {source_info}
+        """,
+        agent=gatekeeper,
+        expected_output="Bestätigung der Ausführung."
+    )
+    
+    # Task 5: Gardening (Memify)
+    garden_task = Task(
+        description="""
+        Prüfe den Graphen nach dem Import.
+        1. Gibt es 'Orphan Families' (Familien ohne Items)?
+        2. Gibt es Items ohne URL?
+        3. Melde Statistiken (z.B. "Jetzt 50 Zelte im Graph").
+        """,
+        agent=gardener,
+        context=[execute_task],
+        expected_output="Ein Gesundheits-Bericht des Graphen."
+    )
+    
+    return [execute_task, garden_task]
