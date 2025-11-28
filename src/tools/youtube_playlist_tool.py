@@ -77,10 +77,17 @@ class YouTubePlaylistTool(BaseTool):
     def _run(self, playlist_identifier: str, max_videos: int = 20) -> str:
         """Fetch videos from the playlist"""
 
+        # For URLs, try yt-dlp FIRST (faster, no API needed)
+        if 'youtube.com' in playlist_identifier or 'youtu.be' in playlist_identifier:
+            yt_dlp_result = self._try_yt_dlp(playlist_identifier, max_videos)
+            if yt_dlp_result:
+                return yt_dlp_result
+
+        # Fall back to API for playlist names or if yt-dlp failed
         youtube = self._get_youtube_client()
 
         if not youtube:
-            return self._fallback_response(playlist_identifier, max_videos)
+            return self._manual_instructions(playlist_identifier)
 
         playlist_id = self._extract_playlist_id(playlist_identifier)
 
@@ -146,6 +153,52 @@ class YouTubePlaylistTool(BaseTool):
         except Exception as e:
             return f"Error searching playlists: {str(e)}"
 
+    def _try_yt_dlp(self, url: str, max_videos: int) -> Optional[str]:
+        """Try to fetch playlist using yt-dlp (no API needed)"""
+        try:
+            import subprocess
+            import json as json_module
+
+            print(f"Fetching playlist with yt-dlp...")
+
+            result = subprocess.run(
+                ['yt-dlp', '--flat-playlist', '-j', '--no-warnings', url],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+
+            if result.returncode != 0:
+                print(f"yt-dlp failed: {result.stderr[:200]}")
+                return None
+
+            videos = []
+            for line in result.stdout.strip().split('\n'):
+                if line:
+                    try:
+                        data = json_module.loads(line)
+                        videos.append({
+                            'title': data.get('title', 'Unknown'),
+                            'url': f"https://www.youtube.com/watch?v={data.get('id', '')}",
+                            'video_id': data.get('id', '')
+                        })
+                        if len(videos) >= max_videos:
+                            break
+                    except json_module.JSONDecodeError:
+                        continue
+
+            if videos:
+                return self._format_response(videos, url)
+
+            return None
+
+        except FileNotFoundError:
+            print("yt-dlp not installed")
+            return None
+        except Exception as e:
+            print(f"yt-dlp error: {e}")
+            return None
+
     def _format_response(self, videos: List[dict], source: str) -> str:
         """Format video list for agent consumption"""
         response = f"Found {len(videos)} videos from playlist '{source}':\n\n"
@@ -158,9 +211,55 @@ class YouTubePlaylistTool(BaseTool):
         return response
 
     def _fallback_response(self, identifier: str, max_videos: int) -> str:
-        """Provide manual instructions if API unavailable"""
+        """Try yt-dlp as fallback, or provide manual instructions"""
+        # Try yt-dlp fallback
+        try:
+            import subprocess
+            import json as json_module
+
+            # If it's a playlist name, we can't use yt-dlp directly
+            if not ('youtube.com' in identifier or 'youtu.be' in identifier):
+                return self._manual_instructions(identifier)
+
+            print(f"Using yt-dlp to fetch playlist (no API needed)...")
+
+            result = subprocess.run(
+                ['yt-dlp', '--flat-playlist', '-j', identifier],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            if result.returncode != 0:
+                return self._manual_instructions(identifier)
+
+            videos = []
+            for line in result.stdout.strip().split('\n'):
+                if line:
+                    try:
+                        data = json_module.loads(line)
+                        videos.append({
+                            'title': data.get('title', 'Unknown'),
+                            'url': f"https://www.youtube.com/watch?v={data.get('id', '')}",
+                            'video_id': data.get('id', '')
+                        })
+                        if len(videos) >= max_videos:
+                            break
+                    except json_module.JSONDecodeError:
+                        continue
+
+            if videos:
+                return self._format_response(videos, identifier)
+            else:
+                return self._manual_instructions(identifier)
+
+        except Exception as e:
+            return self._manual_instructions(identifier) + f"\n\nyt-dlp error: {e}"
+
+    def _manual_instructions(self, identifier: str) -> str:
+        """Provide manual instructions"""
         return f"""
-YouTube API not available or configured.
+YouTube API not available and yt-dlp failed.
 
 To scan playlist '{identifier}' manually:
 
@@ -169,15 +268,9 @@ To scan playlist '{identifier}' manually:
 3. Provide them to the YouTube Scanner agent
 
 Or configure YouTube API:
-1. Get API key from Google Cloud Console
-2. Set YOUTUBE_API_KEY environment variable
+1. Go to Google Cloud Console
+2. Enable YouTube Data API v3
 3. Run again
-
-Example videos to scan from gear review playlists:
-- https://youtube.com/watch?v=... (video 1)
-- https://youtube.com/watch?v=... (video 2)
-
-Alternatively, provide individual video URLs directly.
 """
 
 
