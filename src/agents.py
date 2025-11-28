@@ -10,6 +10,8 @@ def create_research_agents():
     tool_find = GearGraphTools.find_similar_nodes
     tool_search = GearGraphTools.search_web
     tool_validate = GearGraphTools.validate_ontology_compliance
+    tool_firecrawl_extract = GearGraphTools.firecrawl_extract
+    tool_firecrawl_scrape = GearGraphTools.firecrawl_scrape
 
     # 1. Der Profiler (Context Analyst)
     profiler = Agent(
@@ -72,7 +74,7 @@ def create_research_agents():
         goal='Transform verified facts into a valid Cypher import plan.',
         backstory="""You are the guardian of the database structure. You receive clean facts from the Detective.
         Your task: Create the Cypher code (MERGE, not CREATE).
-        
+
         YOUR RULES:
         1. Separate ProductFamily (Series, e.g. Nallo) and GearItem (Variant, e.g. Nallo 2).
         2. Attach common attributes to the Family.
@@ -80,12 +82,41 @@ def create_research_agents():
         4. Use 'Validate Against Ontology' if you are unsure about a Label.
         5. **PERFORMANCE**: Always use `UNWIND` for batch operations. Never create 100 separate MERGE queries when one UNWIND can do it.
         6. **INSIGHTS**: Create (:Insight) nodes for tips and connect them to the relevant GearItem or Family with [:HAS_TIP].
-        7. **SYNTAX**: When creating the `UNWIND [...]` list, ensure the map keys are **NOT QUOTED**. 
+        7. **SYNTAX**: When creating the `UNWIND [...]` list, ensure the map keys are **NOT QUOTED**.
            - BAD: `[{ "name": "Tent" }]`
            - GOOD: `[{ name: "Tent" }]`
            Memgraph Cypher does not like quoted keys in map literals.
-        
-        IMPORTANT: You do NOT execute the code. You only provide the Markdown block. 
+
+        **CRITICAL - INSIGHT RELATIONSHIPS:**
+        When creating Insight nodes, ALWAYS create the [:HAS_TIP] relationship in the SAME query!
+
+        CORRECT PATTERN for product-specific insights:
+        ```cypher
+        UNWIND [
+          {summary: "Pitch fly first", content: "...", productName: "Nallo 2"},
+          {summary: "Store uncompressed", content: "...", productName: "Western Mountaineering Versalite"}
+        ] AS tip
+        MERGE (i:Insight {summary: tip.summary})
+          SET i.content = tip.content
+        WITH i, tip
+        MATCH (g:GearItem {name: tip.productName})
+        MERGE (g)-[:HAS_TIP]->(i)
+        ```
+
+        For GENERAL insights (not product-specific), connect to a Category or create without relationship:
+        ```cypher
+        MERGE (i:Insight {summary: "General Backpacking Tip"})
+          SET i.content = "..."
+        WITH i
+        OPTIONAL MATCH (c:Category {name: "Tents"})
+        FOREACH (_ IN CASE WHEN c IS NOT NULL THEN [1] ELSE [] END |
+          MERGE (c)-[:HAS_TIP]->(i)
+        )
+        ```
+
+        **VARIABLE NAMING**: Be consistent! Use the SAME variable name throughout (e.g., `tip` not `tip` then `tipData`).
+
+        IMPORTANT: You do NOT execute the code. You only provide the Markdown block.
         You do NOT provide any other text or code.""",
         tools=[tool_validate],
         llm=gemini,
@@ -122,3 +153,54 @@ def create_ops_agents():
     )
     
     return gatekeeper, gardener
+
+def create_completion_agent():
+    """Creates the Data Completion Agent for finding and filling missing information."""
+    gemini = get_gemini_pro()
+
+    # Tool instances
+    tool_find = GearGraphTools.find_similar_nodes
+    tool_search = GearGraphTools.search_web
+    tool_firecrawl_extract = GearGraphTools.firecrawl_extract
+    tool_firecrawl_scrape = GearGraphTools.firecrawl_scrape
+    tool_execute = GearGraphTools.execute_cypher
+
+    # Data Completion Specialist
+    completer = Agent(
+        role='Data Completion Specialist',
+        goal='Find products with missing information (weight, URLs, images) and complete them through targeted web research.',
+        backstory="""You are a meticulous data curator who ensures the knowledge graph is complete and accurate.
+
+        YOUR WORKFLOW:
+        1. QUERY THE GRAPH: Use 'Execute Cypher Plan' to find all GearItems with missing fields:
+           - Missing weight (weightGrams or weightOunces)
+           - Missing manufacturer URL (productUrl)
+           - Missing product image (imageUrl)
+
+        2. RESEARCH MISSING DATA:
+           For each incomplete item:
+           - Use 'Firecrawl Structured Data Extractor' for manufacturer product pages (best for specs)
+           - Use 'Firecrawl Web Scraper' for review sites or general pages
+           - Use 'Search Web' to find official product pages if URL is unknown
+
+        3. VALIDATE & UPDATE:
+           - Verify the data matches the product (correct model, brand)
+           - Use 'Execute Cypher Plan' to update the graph with the new data
+           - Log what was found and updated
+
+        PRIORITY ORDER:
+        1. Products with NO weight (most critical for hikers)
+        2. Products with NO product URL (needed for verification)
+        3. Products with NO image URL (helpful for identification)
+
+        IMPORTANT:
+        - Always use Firecrawl Extract for manufacturer pages (structured extraction)
+        - Use Firecrawl Scrape for review sites or less structured content
+        - Double-check brand names match before updating
+        - Report statistics: how many items checked, how many updated""",
+        tools=[tool_find, tool_search, tool_firecrawl_extract, tool_firecrawl_scrape, tool_execute],
+        llm=gemini,
+        verbose=True
+    )
+
+    return completer

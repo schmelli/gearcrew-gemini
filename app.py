@@ -1,7 +1,7 @@
 import streamlit as st
 from crewai import Crew, Process
-from src.agents import create_research_agents, create_ops_agents
-from src.tasks import create_extraction_tasks, create_blueprint_task, create_refinement_task, create_execution_tasks
+from src.agents import create_research_agents, create_ops_agents, create_completion_agent
+from src.tasks import create_extraction_tasks, create_blueprint_task, create_refinement_task, create_execution_tasks, create_completion_task
 import os
 from dotenv import load_dotenv
 import json
@@ -29,10 +29,12 @@ with st.sidebar:
     if st.session_state['step'] == 'input':
         st.progress(0)
     elif st.session_state['step'] == 'review':
-        st.progress(33)
+        st.progress(25)
     elif st.session_state['step'] == 'architect':
-        st.progress(66)
+        st.progress(50)
     elif st.session_state['step'] == 'execute':
+        st.progress(75)
+    elif st.session_state['step'] == 'complete':
         st.progress(100)
 
     if st.button("Reset Process"):
@@ -234,7 +236,52 @@ elif st.session_state['step'] == 'execute':
             st.success("Import Successful!")
             st.subheader("🌿 Gardener's Report")
             st.markdown(result)
-            
+
+            st.divider()
+            if st.button("🔍 Run Data Completion", type="primary"):
+                st.session_state['step'] = 'complete'
+                st.rerun()
+
+            if st.button("Skip Completion & Start New"):
+                st.session_state['step'] = 'input'
+                st.session_state['extracted_data'] = None
+                st.session_state['extracted_insights'] = None
+                st.session_state['cypher_plan'] = ""
+                st.session_state['chat_history'] = []
+                st.rerun()
+
+    except Exception as e:
+        st.error(f"Execution Failed: {e}")
+
+# --- STEP 5: DATA COMPLETION ---
+elif st.session_state['step'] == 'complete':
+    st.header("🔍 Step 5: Data Completion")
+
+    st.info("""
+    The Data Completion agent will:
+    - Find products with missing weight, URLs, or images
+    - Search the web for missing information
+    - Extract structured data from manufacturer pages
+    - Update the graph with complete information
+    """)
+
+    try:
+        with st.status("🔎 Completing missing data...", expanded=True) as status:
+            completer = create_completion_agent()
+            tasks = create_completion_task(completer)
+
+            completion_crew = Crew(
+                agents=[completer],
+                tasks=tasks,
+                verbose=True
+            )
+
+            result = completion_crew.kickoff()
+
+            st.success("Data Completion Finished!")
+            st.subheader("📊 Completion Report")
+            st.markdown(result)
+
             if st.button("Start New Import"):
                 st.session_state['step'] = 'input'
                 st.session_state['extracted_data'] = None
@@ -242,6 +289,9 @@ elif st.session_state['step'] == 'execute':
                 st.session_state['cypher_plan'] = ""
                 st.session_state['chat_history'] = []
                 st.rerun()
-                
+
     except Exception as e:
-        st.error(f"Execution Failed: {e}")
+        st.error(f"Data Completion Failed: {e}")
+        if st.button("Skip & Start New"):
+            st.session_state['step'] = 'input'
+            st.rerun()

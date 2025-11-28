@@ -150,3 +150,76 @@ def create_execution_tasks(gatekeeper, gardener, approved_cypher_plan, source_in
     )
     
     return [execute_task, garden_task]
+
+def create_completion_task(completer):
+    """
+    Creates the data completion task for finding and filling missing information.
+
+    Args:
+        completer: The Data Completion Specialist agent
+
+    Returns:
+        List containing the completion task
+    """
+    completion_task = Task(
+        description="""
+        Scan the graph for incomplete product data and fill in missing information.
+
+        STEP 1 - FIND INCOMPLETE ITEMS:
+        Query the graph to find GearItems with missing fields:
+
+        ```cypher
+        MATCH (item:GearItem)
+        WHERE item.weightGrams IS NULL
+           OR item.weightOunces IS NULL
+           OR item.productUrl IS NULL
+           OR item.imageUrl IS NULL
+        RETURN item.name, item.brand,
+               item.weightGrams, item.weightOunces,
+               item.productUrl, item.imageUrl
+        LIMIT 10
+        ```
+
+        STEP 2 - RESEARCH & EXTRACT:
+        For each incomplete item:
+        a) If you know the manufacturer URL or can find it via web search:
+           - Use 'Firecrawl Structured Data Extractor' to get specs from the official page
+
+        b) If you only have the product name:
+           - Use 'Search Web' with query like: "[Brand] [Product Name] weight specifications"
+           - Then use 'Firecrawl Structured Data Extractor' on the best result
+
+        c) Validate the data:
+           - Ensure weight is in grams (convert if needed: 1 oz = 28.35g)
+           - Ensure URLs are valid and match the product
+           - Ensure brand name matches
+
+        STEP 3 - UPDATE GRAPH:
+        For each item with new data found, update the graph:
+
+        ```cypher
+        MATCH (item:GearItem {name: "Product Name"})
+        SET item.weightGrams = 450,
+            item.productUrl = "https://...",
+            item.imageUrl = "https://..."
+        ```
+
+        STEP 4 - REPORT:
+        Provide a summary:
+        - Total items checked: X
+        - Items with missing weight: X (Y updated)
+        - Items with missing productUrl: X (Y updated)
+        - Items with missing imageUrl: X (Y updated)
+        - Failed to find data for: [list of product names]
+        """,
+        agent=completer,
+        expected_output="""
+        A detailed completion report with:
+        1. Statistics of incomplete items found
+        2. List of items successfully updated with what data was added
+        3. List of items that still need manual research
+        4. Total number of graph updates performed
+        """
+    )
+
+    return [completion_task]
